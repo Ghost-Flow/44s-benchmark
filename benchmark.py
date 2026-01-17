@@ -21,7 +21,12 @@ console = Console()
 
 # Configuration
 FORTY_FOURS_API = "https://api.44s.io"
-API_KEY = os.environ.get("FORTY_FOURS_API_KEY", "")
+FORTY_FOURS_HOST = "api.44s.io"
+FORTY_FOURS_PORT = 6379
+
+# Public demo key for benchmarking (anyone can use this)
+DEMO_KEY = "44s_benchmark_demo_2026"
+API_KEY = os.environ.get("FORTY_FOURS_API_KEY", DEMO_KEY)
 
 class BenchmarkResults:
     def __init__(self, name: str, ops: int, duration: float):
@@ -79,54 +84,56 @@ def benchmark_redis_local(requests: int, concurrency: int) -> BenchmarkResults:
     return BenchmarkResults("Redis (local)", completed[0], duration)
 
 # ============================================================================
-# 44s BENCHMARK
+# 44s BENCHMARK (Redis Protocol - same as local Redis, fair comparison)
 # ============================================================================
 
-async def benchmark_44s_cache(requests: int, concurrency: int) -> BenchmarkResults:
-    """Benchmark 44s Cache with concurrent operations."""
+def benchmark_44s_cache(requests: int, concurrency: int) -> BenchmarkResults:
+    """Benchmark 44s Cache with concurrent operations using Redis protocol."""
     if not API_KEY:
         console.print("[red]Error: FORTY_FOURS_API_KEY environment variable not set[/red]")
         console.print("  Get your API key at https://44s.io/dashboard")
         return BenchmarkResults("44s Cache", 0, 1)
     
-    completed = 0
+    try:
+        # Connect to 44s using Redis protocol (same as local Redis!)
+        r = redis.Redis(host='api.44s.io', port=6379, password=API_KEY, decode_responses=True)
+        r.ping()
+    except redis.ConnectionError as e:
+        console.print(f"[red]Error: Cannot connect to 44s API: {e}[/red]")
+        return BenchmarkResults("44s Cache", 0, 1)
+    except redis.AuthenticationError:
+        console.print("[red]Error: Invalid API key[/red]")
+        return BenchmarkResults("44s Cache", 0, 1)
     
-    async def worker(session: aiohttp.ClientSession, worker_id: int, ops: int):
-        nonlocal completed
-        headers = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
-        
-        for i in range(ops):
-            key = f"bench:{worker_id}:{i}"
-            
-            # SET
-            async with session.post(
-                f"{FORTY_FOURS_API}/cache/set",
-                json={"key": key, "value": f"value_{i}"},
-                headers=headers
-            ) as resp:
-                if resp.status == 200:
-                    completed += 1
-            
-            # GET
-            async with session.get(
-                f"{FORTY_FOURS_API}/cache/get/{key}",
-                headers=headers
-            ) as resp:
-                if resp.status == 200:
-                    completed += 1
+    lock = threading.Lock()
+    completed = [0]
     
-    ops_per_worker = requests // concurrency
+    def worker(thread_id: int, ops_per_thread: int):
+        for i in range(ops_per_thread):
+            key = f"bench:{thread_id}:{i}"
+            r.set(key, f"value_{i}")
+            r.get(key)
+            with lock:
+                completed[0] += 2  # SET + GET = 2 ops
     
-    connector = aiohttp.TCPConnector(limit=concurrency * 2)
-    timeout = aiohttp.ClientTimeout(total=300)
+    ops_per_thread = requests // concurrency
     
     start = time.perf_counter()
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        tasks = [worker(session, i, ops_per_worker) for i in range(concurrency)]
-        await asyncio.gather(*tasks)
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = [executor.submit(worker, i, ops_per_thread) for i in range(concurrency)]
+        for f in futures:
+            f.result()
     duration = time.perf_counter() - start
     
-    return BenchmarkResults("44s Cache", completed, duration)
+    # Cleanup
+    try:
+        for i in range(concurrency):
+            for j in range(ops_per_thread):
+                r.delete(f"bench:{i}:{j}")
+    except:
+        pass  # Best effort cleanup
+    
+    return BenchmarkResults("44s Cache", completed[0], duration)
 
 # ============================================================================
 # MAIN BENCHMARK RUNNER
@@ -157,7 +164,7 @@ def run_cache_benchmark(requests: int, concurrency: int):
         console=console,
     ) as progress:
         progress.add_task("Benchmarking 44s Cache...", total=None)
-        fortyfours_results = asyncio.run(benchmark_44s_cache(requests, concurrency))
+        fortyfours_results = benchmark_44s_cache(requests, concurrency)
     
     console.print(f"  [green]✓[/green] 44s:   {fortyfours_results.ops_per_sec:,.0f} ops/sec")
     

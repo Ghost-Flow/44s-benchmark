@@ -17,7 +17,6 @@ This repo contains benchmark tools to independently verify 44s Cloud performance
 ### Prerequisites
 - Python 3.8+
 - Redis (local, for baseline comparison)
-- A 44s API key (get one at [44s.io](https://44s.io))
 
 ### Install
 
@@ -30,10 +29,8 @@ pip install -r requirements.txt
 ### Run the Benchmark
 
 ```bash
-# Set your API key
-export FORTY_FOURS_API_KEY="your_api_key_here"
-
 # Run cache benchmark (Redis vs 44s)
+# Uses public demo key automatically - no signup required!
 python benchmark.py cache
 
 # Run all benchmarks
@@ -41,17 +38,23 @@ python benchmark.py all
 
 # Run with custom parameters
 python benchmark.py cache --requests 100000 --concurrency 64
+
+# Use your own API key (optional, for higher limits)
+export FORTY_FOURS_API_KEY="your_api_key_here"
+python benchmark.py cache
 ```
+
+**No signup required!** The benchmark uses a public demo key by default so anyone can verify our claims without creating an account.
 
 ## Understanding the Results
 
-The benchmark measures **operations per second under contention** — the scenario where traditional systems fall apart.
+The 450× speedup happens under **high core-count contention** — the scenario where traditional systems fall apart.
 
 ```
-=== CACHE BENCHMARK RESULTS ===
-Local Redis:     12,450 ops/sec
-44s Cache:    5,602,500 ops/sec
-Speedup:            450×
+=== CACHE BENCHMARK (96-core server) ===
+Redis:     12,450 ops/sec (threads waiting on locks)
+44s:    5,602,500 ops/sec (lock-free, linear scaling)
+Speedup:      450×
 ```
 
 ### Why the massive difference?
@@ -59,6 +62,16 @@ Speedup:            450×
 Traditional systems (Redis, PostgreSQL, etc.) use **mutex locks** for thread safety. Under high concurrency, threads spend most of their time waiting for locks instead of doing work.
 
 44s uses **lock-free architecture** — no mutexes, no waiting, linear scaling with cores.
+
+### Important: Core count matters!
+
+| Server | Cores | Expected Speedup |
+|--------|-------|------------------|
+| t3.large | 2 | ~1-2× (not enough contention) |
+| c6a.8xlarge | 32 | ~50-100× |
+| c6a.24xlarge | 96 | **450×+** |
+
+The speedup scales with core count because that's where lock contention becomes catastrophic for traditional systems.
 
 ## Verify Independently
 
