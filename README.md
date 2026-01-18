@@ -134,6 +134,13 @@ MIT — do whatever you want with this benchmark code.
 
 The 44s Cloud service itself is proprietary and protected by [patents](https://44s.io/verify.html).
 
+## Contact
+
+Questions? Found a bug? Want to verify something?
+
+- Twitter/X: [@builtbyZach](https://x.com/builtbyZach)
+- Website: [44s.io](https://44s.io)
+
 ---
 
 **Still skeptical?** Good. [Run the benchmark](https://44s.io) →
