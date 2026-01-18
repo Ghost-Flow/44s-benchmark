@@ -33,11 +33,15 @@ pip install -r requirements.txt
 # Uses public demo key automatically - no signup required!
 python benchmark.py cache
 
+# Run database benchmark (PostgreSQL vs 44s)
+python benchmark.py database
+
 # Run all benchmarks
 python benchmark.py all
 
 # Run with custom parameters
 python benchmark.py cache --requests 100000 --concurrency 64
+python benchmark.py database --requests 1000 --concurrency 16
 
 # Use your own API key (optional, for higher limits)
 export FORTY_FOURS_API_KEY="your_api_key_here"

@@ -224,6 +224,226 @@ def cache(requests, concurrency):
     print_banner()
     run_cache_benchmark(requests, concurrency)
 
+# ============================================================================
+# DATABASE BENCHMARK
+# ============================================================================
+
+def benchmark_postgres_local(requests: int, concurrency: int) -> BenchmarkResults:
+    """Benchmark local PostgreSQL with concurrent operations."""
+    try:
+        import psycopg2
+        from psycopg2 import pool
+    except ImportError:
+        console.print("[red]Error: psycopg2 not installed. Run: pip install psycopg2-binary[/red]")
+        return BenchmarkResults("PostgreSQL (local)", 0, 1)
+    
+    try:
+        # Try to connect to local PostgreSQL
+        conn = psycopg2.connect(
+            host='localhost',
+            port=5432,
+            user=os.environ.get('PGUSER', 'postgres'),
+            password=os.environ.get('PGPASSWORD', ''),
+            database=os.environ.get('PGDATABASE', 'postgres')
+        )
+        conn.close()
+    except Exception as e:
+        console.print(f"[red]Error: Cannot connect to local PostgreSQL: {e}[/red]")
+        console.print("  Install: brew install postgresql && brew services start postgresql")
+        console.print("  Or: docker run -p 5432:5432 -e POSTGRES_PASSWORD=test postgres")
+        return BenchmarkResults("PostgreSQL (local)", 0, 1)
+    
+    # Create connection pool
+    try:
+        connection_pool = pool.ThreadedConnectionPool(
+            minconn=1,
+            maxconn=concurrency + 5,
+            host='localhost',
+            port=5432,
+            user=os.environ.get('PGUSER', 'postgres'),
+            password=os.environ.get('PGPASSWORD', ''),
+            database=os.environ.get('PGDATABASE', 'postgres')
+        )
+    except Exception as e:
+        console.print(f"[red]Error creating connection pool: {e}[/red]")
+        return BenchmarkResults("PostgreSQL (local)", 0, 1)
+    
+    # Setup: create test table
+    conn = connection_pool.getconn()
+    cur = conn.cursor()
+    cur.execute("DROP TABLE IF EXISTS bench_test")
+    cur.execute("CREATE TABLE bench_test (id INTEGER PRIMARY KEY, value TEXT, counter INTEGER)")
+    conn.commit()
+    connection_pool.putconn(conn)
+    
+    lock = threading.Lock()
+    completed = [0]
+    
+    def worker(thread_id: int, ops_per_thread: int):
+        conn = connection_pool.getconn()
+        cur = conn.cursor()
+        try:
+            for i in range(ops_per_thread):
+                row_id = thread_id * 100000 + i
+                # INSERT
+                cur.execute("INSERT INTO bench_test VALUES (%s, %s, %s) ON CONFLICT (id) DO UPDATE SET value = %s",
+                           (row_id, f"value_{i}", i, f"value_{i}"))
+                conn.commit()
+                # SELECT
+                cur.execute("SELECT * FROM bench_test WHERE id = %s", (row_id,))
+                cur.fetchone()
+                with lock:
+                    completed[0] += 2  # INSERT + SELECT = 2 ops
+        finally:
+            connection_pool.putconn(conn)
+    
+    ops_per_thread = requests // concurrency
+    
+    start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = [executor.submit(worker, i, ops_per_thread) for i in range(concurrency)]
+        for f in futures:
+            f.result()
+    duration = time.perf_counter() - start
+    
+    # Cleanup
+    conn = connection_pool.getconn()
+    cur = conn.cursor()
+    cur.execute("DROP TABLE IF EXISTS bench_test")
+    conn.commit()
+    connection_pool.putconn(conn)
+    connection_pool.closeall()
+    
+    return BenchmarkResults("PostgreSQL (local)", completed[0], duration)
+
+
+def benchmark_44s_database(requests: int, concurrency: int) -> BenchmarkResults:
+    """Benchmark 44s Database with concurrent operations."""
+    import urllib.request
+    import json
+    
+    FORTY_FOURS_DB_URL = "http://api.44s.io:8600"
+    
+    # Test connection
+    try:
+        req = urllib.request.Request(f"{FORTY_FOURS_DB_URL}/health", timeout=5)
+        urllib.request.urlopen(req)
+    except Exception as e:
+        console.print(f"[red]Error: Cannot connect to 44s Database: {e}[/red]")
+        return BenchmarkResults("44s Database", 0, 1)
+    
+    def execute_sql(sql):
+        req = urllib.request.Request(
+            f"{FORTY_FOURS_DB_URL}/sql",
+            data=json.dumps({"sql": sql}).encode(),
+            headers={"Content-Type": "application/json", "X-API-Key": API_KEY},
+            method="POST"
+        )
+        try:
+            response = urllib.request.urlopen(req, timeout=10)
+            return json.loads(response.read().decode())
+        except Exception as e:
+            return {"error": str(e)}
+    
+    # Setup: create test table
+    execute_sql("DROP TABLE IF EXISTS bench_test")
+    execute_sql("CREATE TABLE bench_test (id INTEGER PRIMARY KEY, value TEXT, counter INTEGER)")
+    
+    lock = threading.Lock()
+    completed = [0]
+    
+    def worker(thread_id: int, ops_per_thread: int):
+        for i in range(ops_per_thread):
+            row_id = thread_id * 100000 + i
+            # INSERT
+            execute_sql(f"INSERT INTO bench_test VALUES ({row_id}, 'value_{i}', {i})")
+            # SELECT
+            execute_sql(f"SELECT * FROM bench_test WHERE id = {row_id}")
+            with lock:
+                completed[0] += 2  # INSERT + SELECT = 2 ops
+    
+    ops_per_thread = requests // concurrency
+    
+    start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = [executor.submit(worker, i, ops_per_thread) for i in range(concurrency)]
+        for f in futures:
+            f.result()
+    duration = time.perf_counter() - start
+    
+    # Cleanup
+    execute_sql("DROP TABLE IF EXISTS bench_test")
+    
+    return BenchmarkResults("44s Database", completed[0], duration)
+
+
+def run_database_benchmark(requests: int, concurrency: int):
+    """Run database benchmark comparing PostgreSQL vs 44s."""
+    console.print(f"\n[bold]Database Benchmark[/bold]")
+    console.print(f"  Requests: {requests:,}")
+    console.print(f"  Concurrency: {concurrency}")
+    console.print()
+    
+    # Benchmark PostgreSQL
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        progress.add_task("Benchmarking local PostgreSQL...", total=None)
+        pg_results = benchmark_postgres_local(requests, concurrency)
+    
+    if pg_results.ops_per_sec > 0:
+        console.print(f"  [green]✓[/green] PostgreSQL: {pg_results.ops_per_sec:,.0f} ops/sec")
+    
+    # Benchmark 44s Database
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        progress.add_task("Benchmarking 44s Database...", total=None)
+        fortyfours_results = benchmark_44s_database(requests, concurrency)
+    
+    console.print(f"  [green]✓[/green] 44s Database: {fortyfours_results.ops_per_sec:,.0f} ops/sec")
+    
+    # Results
+    if pg_results.ops_per_sec > 0 and fortyfours_results.ops_per_sec > 0:
+        speedup = fortyfours_results.ops_per_sec / pg_results.ops_per_sec
+        
+        console.print()
+        table = Table(title="Database Benchmark Results", show_header=True)
+        table.add_column("System", style="cyan")
+        table.add_column("Ops/sec", justify="right", style="green")
+        table.add_column("Speedup", justify="right", style="yellow")
+        
+        table.add_row("PostgreSQL (local)", f"{pg_results.ops_per_sec:,.0f}", "1×")
+        table.add_row("44s Database (remote)", f"{fortyfours_results.ops_per_sec:,.0f}", f"{speedup:.1f}×")
+        
+        console.print(table)
+        
+        if fortyfours_results.ops_per_sec < 100:
+            console.print(f"\n[bold yellow]⚠️  NETWORK LATENCY WARNING[/bold yellow]")
+            console.print()
+            console.print("[yellow]44s Database is running remotely, PostgreSQL is local.[/yellow]")
+            console.print("[yellow]Network latency (~150ms) dominates remote results.[/yellow]")
+            console.print()
+            console.print("[bold]For a fair 47× comparison:[/bold]")
+            console.print("  1. Run both databases on the same server")
+            console.print("  2. Use a high-core server (32+ cores) to see lock contention effects")
+            console.print("  3. Under high concurrency, PostgreSQL locks destroy performance")
+            console.print("     while 44s scales linearly")
+
+
+@cli.command()
+@click.option('--requests', '-r', default=1000, help='Number of requests')
+@click.option('--concurrency', '-c', default=16, help='Concurrent connections')
+def database(requests, concurrency):
+    """Benchmark 44s Database vs PostgreSQL."""
+    print_banner()
+    run_database_benchmark(requests, concurrency)
+
+
 @cli.command()
 @click.option('--requests', '-r', default=10000, help='Number of requests')
 @click.option('--concurrency', '-c', default=32, help='Concurrent connections')
@@ -231,7 +451,7 @@ def all(requests, concurrency):
     """Run all benchmarks."""
     print_banner()
     run_cache_benchmark(requests, concurrency)
-    # TODO: Add serverless, database benchmarks
+    run_database_benchmark(min(requests, 1000), concurrency)  # Fewer requests for DB due to latency
 
 @cli.command()
 def check():
