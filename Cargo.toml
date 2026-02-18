@@ -1,0 +1,20 @@
+[package]
+name = "fortyfours-benchmark"
+version = "1.0.0"
+edition = "2021"
+description = "Verify 44s Cloud performance claims. Lock-free vs traditional. Don't believe 1900x? Run it yourself."
+license = "MIT"
+repository = "https://github.com/Ghost-Flow/44s-benchmark"
+keywords = ["benchmark", "lock-free", "cache", "redis", "performance"]
+
+[dependencies]
+dashmap = "5.5"
+crossbeam-skiplist = "0.1"
+crossbeam-queue = "0.3"
+redis = "0.24"
+num_cpus = "1.16"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
