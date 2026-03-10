@@ -1,14 +1,14 @@
 # 44s Benchmark
 
-**Don't believe 1,900× faster? Run it yourself.**
+**Don't believe the speedups? Run it yourself.**
 
 This repo contains benchmark tools to independently verify [44s Cloud](https://44s.io) performance claims. No trust required — just math.
 
-Everything runs **locally on your machine**. No network calls. No hosted service. No signup. No API key. Just `cargo run --release` and your own Redis instance.
+Everything runs **locally on your machine**. No network calls to our servers. No signup. No API key. Just `cargo run --release` and optionally your own Redis instance.
 
 ## Results (128-core AWS c6i.metal)
 
-### Cache — 44s vs Redis
+### Cache — 44s (in-process DashMap) vs Redis (localhost TCP)
 
 | Threads | 44s Cache | Redis | Speedup |
 |---------|-----------|-------|---------|
@@ -19,24 +19,26 @@ Everything runs **locally on your machine**. No network calls. No hosted service
 | 64 | 97.85M ops/s | 78K ops/s | **1,253×** |
 | 128 | 149.23M ops/s | 78K ops/s | **1,910×** |
 
-### Database — 44s vs PostgreSQL
+> **Methodology note:** The cache benchmark compares in-process concurrent hashmap operations against Redis over localhost TCP. This is intentional — it measures the combined overhead of network I/O, serialization, and protocol parsing that external services require. 44s eliminates that overhead by embedding the data structure in-process. If you want a pure data-structure comparison, see the KV cache benchmark below which compares two in-process implementations.
+
+### Database — 44s (lock-free SkipMap) vs PostgreSQL
 
 | Threads | 44s Database | PostgreSQL* | Speedup |
 |---------|-------------|-------------|---------|
-| 1 | 3.33M ops/s | 15K ops/s | **222×** |
-| 16 | 13.06M ops/s | 15K ops/s | **871×** |
-| 64 | 17.31M ops/s | 15K ops/s | **1,154×** |
-| 128 | 14.77M ops/s | 15K ops/s | **984×** |
+| 1 | 3.33M ops/s | 50K ops/s | **67×** |
+| 16 | 13.06M ops/s | 50K ops/s | **261×** |
+| 64 | 17.31M ops/s | 50K ops/s | **346×** |
+| 128 | 14.77M ops/s | 50K ops/s | **295×** |
 
-### Queue — 44s vs RabbitMQ
+### Queue — 44s (lock-free SegQueue) vs RabbitMQ
 
 | Threads | 44s Queue | RabbitMQ* | Speedup |
 |---------|----------|-----------|---------|
-| 1 | 6.08M msg/s | 20K msg/s | **304×** |
-| 16 | 6.79M msg/s | 20K msg/s | **340×** |
-| 64 | 5.43M msg/s | 20K msg/s | **271×** |
+| 1 | 6.08M msg/s | 50K msg/s | **122×** |
+| 16 | 6.79M msg/s | 50K msg/s | **136×** |
+| 64 | 5.43M msg/s | 50K msg/s | **109×** |
 
-### AI Inference KV Cache — Lock-Free vs RwLock
+### AI Inference KV Cache — Lock-Free Atomics vs RwLock (apples-to-apples)
 
 | Threads | Traditional (ms) | 44s Fractal (ms) | Speedup |
 |---------|-----------------|-------------------|---------|
@@ -46,9 +48,9 @@ Everything runs **locally on your machine**. No network calls. No hosted service
 | 64 | 20,160 | 21 | **930×** |
 | 128 | 49,870 | 46 | **1,078×** |
 
-> Traditional KV cache gets **334× slower** from 1→128 threads. 44s stays flat.
+> Traditional KV cache gets **334× slower** from 1→128 threads. 44s stays flat. This is a pure in-process comparison — no network overhead on either side.
 
-*\*PostgreSQL/RabbitMQ baselines are industry-standard figures. Install them locally and run your own benchmarks to verify.*
+*\*PostgreSQL baseline: ~50K ops/sec (pgbench, 16 clients, default config). RabbitMQ baseline: ~50K msgs/sec (tuned, persistent, acknowledged). Install them locally and run your own benchmarks to verify.*
 
 ## Quick Start
 
@@ -102,7 +104,7 @@ Traditional (mutex-based):
   More threads = more throughput = LINEAR SCALING
 ```
 
-44s uses **lock-free architecture** — [DashMap](https://docs.rs/dashmap), [SkipMap](https://docs.rs/crossbeam-skiplist), [SegQueue](https://docs.rs/crossbeam-queue) — no mutexes, no waiting, linear scaling with cores.
+44s uses concurrent and lock-free data structures — [DashMap](https://docs.rs/dashmap) (sharded concurrent hashmap), [SkipMap](https://docs.rs/crossbeam-skiplist) (lock-free sorted map), [SegQueue](https://docs.rs/crossbeam-queue) (lock-free MPMC queue) — minimal locking, linear scaling with cores.
 
 Redis in particular is **single-threaded by design**. It literally cannot use more than one core. On modern servers with 64-192 cores, that's leaving 98%+ of your hardware idle.
 
@@ -121,7 +123,7 @@ The speedup scales with core count because that's where lock contention becomes 
 
 This benchmark uses three open-source Rust crates:
 
-- **[dashmap](https://crates.io/crates/dashmap)** — Lock-free concurrent HashMap (Cache benchmark)
+- **[dashmap](https://crates.io/crates/dashmap)** — Sharded concurrent HashMap (Cache benchmark)
 - **[crossbeam-skiplist](https://crates.io/crates/crossbeam-skiplist)** — Lock-free concurrent sorted map (Database benchmark)
 - **[crossbeam-queue](https://crates.io/crates/crossbeam-queue)** — Lock-free MPMC queue (Queue benchmark)
 

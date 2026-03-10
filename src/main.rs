@@ -2,20 +2,29 @@
 //!
 //! Verify 44s Cloud performance claims yourself. No trust required — just math.
 //!
-//! This benchmark compares lock-free data structures (the foundation of 44s Cloud)
+//! This benchmark compares concurrent data structures (the foundation of 44s Cloud)
 //! against traditional mutex-based systems and industry-standard databases.
 //!
 //! Everything runs LOCALLY on YOUR machine. No network. No hosted service.
 //! No signup. No API key. Just `cargo run --release`.
 //!
-//! ## What This Proves
+//! ## What This Measures
 //!
-//! Traditional systems (Redis, PostgreSQL, RabbitMQ) use mutex locks for thread
-//! safety. Under high concurrency, threads spend most of their time WAITING for
-//! locks instead of doing work. The more cores you add, the WORSE it gets.
+//! The raw throughput of concurrent data structures vs traditional approaches:
+//! - **Cache**: DashMap (sharded concurrent) vs Redis over localhost TCP
+//! - **Database index**: crossbeam SkipMap (lock-free) vs PostgreSQL baseline
+//! - **Queue**: crossbeam SegQueue (lock-free MPMC) vs RabbitMQ baseline
+//! - **AI KV Cache**: Atomic cache-line-aligned slots vs RwLock<HashMap>
 //!
-//! 44s uses lock-free architecture — no mutexes, no waiting, linear scaling.
-//! This benchmark lets you verify that claim on your own hardware.
+//! ## Methodology Notes
+//!
+//! The cache benchmark compares in-process operations against Redis over TCP.
+//! This is intentional — it measures the overhead of network I/O + serialization
+//! + protocol parsing that traditional architectures require. 44s eliminates
+//! that overhead by embedding the data structure in-process.
+//!
+//! For database and queue, baselines are published numbers for tuned deployments.
+//! Install PostgreSQL/RabbitMQ locally to compare against your own instance.
 //!
 //! Learn more: https://44s.io
 
@@ -141,7 +150,7 @@ fn run_cache_benchmark(threads: &[usize], ops: u64) {
     println!("│               CACHE BENCHMARK                               │");
     println!("│          44s Lock-Free Cache vs Redis                        │");
     println!("│                                                             │");
-    println!("│  44s: DashMap (lock-free concurrent hashmap)                │");
+    println!("│  44s: DashMap (sharded concurrent hashmap, no global lock)  │");
     println!("│  Redis: Single-threaded, mutex-based                        │");
     println!("└─────────────────────────────────────────────────────────────┘\n");
 
@@ -246,14 +255,14 @@ fn bench_44s_database(threads: usize, ops: u64) -> u64 {
 
 fn run_database_benchmark(threads: &[usize], ops: u64) {
     // PostgreSQL typical OLTP under contention
-    let pg_baseline: u64 = 15_000;
+    let pg_baseline: u64 = 50_000;
 
     println!("\n┌─────────────────────────────────────────────────────────────┐");
     println!("│              DATABASE BENCHMARK                             │");
-    println!("│         44s Lock-Free B+Tree vs PostgreSQL                  │");
+    println!("│         44s Lock-Free SkipMap vs PostgreSQL                  │");
     println!("│                                                             │");
-    println!("│  44s: SkipMap (lock-free sorted concurrent map)             │");
-    println!("│  PostgreSQL: ~15K ops/sec typical OLTP under contention     │");
+    println!("│  44s: crossbeam SkipMap (lock-free sorted concurrent map)   │");
+    println!("│  PostgreSQL: ~50K ops/sec (pgbench, 16 clients, default)    │");
     println!("│  (Run pgbench yourself to verify the baseline)              │");
     println!("└─────────────────────────────────────────────────────────────┘\n");
 
@@ -277,8 +286,9 @@ fn run_database_benchmark(threads: &[usize], ops: u64) {
     }
 
     println!("  └──────────┴──────────────────┴──────────────────┴──────────┴───────────────────────────────┘");
-    println!("\n  * PostgreSQL baseline: ~15K ops/sec typical OLTP under contention.");
-    println!("    Install PostgreSQL and run `pgbench` to verify.\n");
+    println!("\n  * PostgreSQL baseline: ~50K ops/sec (pgbench, 16 clients, default config).");
+    println!("    This is generous — contended OLTP with row-level locking drops to 10-20K.");
+    println!("    Install PostgreSQL and run `pgbench -c 16 -j 4 -T 30` to verify.\n");
 }
 
 // =============================================================================
@@ -336,14 +346,14 @@ fn bench_44s_queue(threads: usize, ops: u64) -> u64 {
 }
 
 fn run_queue_benchmark(threads: &[usize], ops: u64) {
-    let rabbitmq_baseline: u64 = 20_000;
+    let rabbitmq_baseline: u64 = 50_000;
 
     println!("\n┌─────────────────────────────────────────────────────────────┐");
     println!("│               QUEUE BENCHMARK                               │");
     println!("│          44s Lock-Free Queue vs RabbitMQ                     │");
     println!("│                                                             │");
     println!("│  44s: SegQueue (lock-free MPMC concurrent queue)            │");
-    println!("│  RabbitMQ: ~20K msgs/sec typical throughput                 │");
+    println!("│  RabbitMQ: ~50K msgs/sec (tuned, persistent, ack'd)         │");
     println!("└─────────────────────────────────────────────────────────────┘\n");
 
     println!("  ┌──────────┬──────────────────┬──────────────────┬──────────┬───────────────────────────────┐");
@@ -366,7 +376,8 @@ fn run_queue_benchmark(threads: &[usize], ops: u64) {
     }
 
     println!("  └──────────┴──────────────────┴──────────────────┴──────────┴───────────────────────────────┘");
-    println!("\n  * RabbitMQ baseline: ~20K msgs/sec typical throughput.\n");
+    println!("\n  * RabbitMQ baseline: ~50K msgs/sec (tuned, persistent, acknowledged).");
+    println!("    With mandatory acks + persistence. Unacked transient can hit 100K+.\n");
 }
 
 // =============================================================================
@@ -416,6 +427,7 @@ struct FractalKVSlot {
 
 impl FractalKVSlot {
     const EMPTY: u8 = 0;
+    const WRITING: u8 = 1;
     const VALID: u8 = 2;
 
     fn new() -> Self {
@@ -466,16 +478,23 @@ impl FractalKVCache {
         if slot.state.load(Ordering::Acquire) != FractalKVSlot::VALID {
             return false;
         }
-        slot.seq_id.load(Ordering::Acquire) == seq_id
+        let matches = slot.seq_id.load(Ordering::Acquire) == seq_id
             && slot.position.load(Ordering::Acquire) == position as u64
             && slot.layer.load(Ordering::Acquire) == layer as u64
-            && slot.head.load(Ordering::Acquire) == head as u64
+            && slot.head.load(Ordering::Acquire) == head as u64;
+        // Re-check state after reading fields to ensure no concurrent write
+        matches && slot.state.load(Ordering::Acquire) == FractalKVSlot::VALID
     }
 
     #[inline]
     fn put(&self, seq_id: u64, layer: usize, head: usize, position: u32) {
         let idx = self.hash(seq_id, position);
         let slot = &self.slots[layer][head][idx];
+        // CAS to acquire the slot — prevents interleaved writes
+        let prev = slot.state.load(Ordering::Acquire);
+        if slot.state.compare_exchange(prev, FractalKVSlot::WRITING, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+            return; // Another writer has it, skip (last-writer-wins is acceptable for KV cache)
+        }
         slot.seq_id.store(seq_id, Ordering::Release);
         slot.position.store(position as u64, Ordering::Release);
         slot.layer.store(layer as u64, Ordering::Release);
@@ -667,7 +686,7 @@ fn main() {
     println!("  ═══════════════════════════════════════════════════════════════");
     println!();
     println!("  These numbers scale with core count. More cores = bigger gap.");
-    println!("  On a 128-core server, cache speedup exceeds 1,900×.");
+    println!("  On a 128-core server, the gap widens dramatically.");
     println!();
     println!("  This is the foundation of 44s Cloud — every service built on");
     println!("  lock-free data structures. Same architecture, 17 products.");
