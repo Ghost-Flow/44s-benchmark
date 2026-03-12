@@ -84,18 +84,22 @@ cargo run --release
 
 ## Why the massive difference?
 
-Traditional systems (Redis, PostgreSQL, RabbitMQ) use **mutex locks** for thread safety. Under high concurrency, threads spend most of their time **waiting for locks** instead of doing work.
+Traditional infrastructure has three bottlenecks that compound under load:
+
+1. **Single-threaded design** — Redis processes all commands on a single core. On a 128-core server, that's 99%+ of your hardware sitting idle.
+2. **Network + serialization overhead** — Every operation requires TCP roundtrips, protocol parsing, and serialization/deserialization. Even on localhost, this adds microseconds per operation.
+3. **Lock contention** — Systems that do attempt concurrency (PostgreSQL row locks, RabbitMQ queue coordination) hit contention that degrades throughput as threads increase.
 
 ```
-Traditional (mutex-based):
-  Thread 1: ████░░░░░░░░░░  (working, then waiting...)
+Traditional infrastructure:
+  Thread 1: ████░░░░░░░░░░  (working, then blocked on I/O or locks...)
   Thread 2: ░░░░████░░░░░░  (waiting, then working...)
   Thread 3: ░░░░░░░░████░░  (waiting, waiting, working...)
   Thread 4: ░░░░░░░░░░░░██  (waiting, waiting, waiting...)
   
-  More threads = more waiting = SLOWER
+  More threads = diminishing returns
 
-44s (lock-free):
+44s (concurrent, in-process):
   Thread 1: ██████████████  (always working)
   Thread 2: ██████████████  (always working)
   Thread 3: ██████████████  (always working)
@@ -104,9 +108,7 @@ Traditional (mutex-based):
   More threads = more throughput = LINEAR SCALING
 ```
 
-44s uses concurrent and lock-free data structures — [DashMap](https://docs.rs/dashmap) (sharded concurrent hashmap), [SkipMap](https://docs.rs/crossbeam-skiplist) (lock-free sorted map), [SegQueue](https://docs.rs/crossbeam-queue) (lock-free MPMC queue) — minimal locking, linear scaling with cores.
-
-Redis in particular is **single-threaded by design**. It literally cannot use more than one core. On modern servers with 64-192 cores, that's leaving 98%+ of your hardware idle.
+44s eliminates all three bottlenecks by embedding concurrent data structures directly in-process — [DashMap](https://docs.rs/dashmap) (sharded concurrent hashmap with minimal locking), [SkipMap](https://docs.rs/crossbeam-skiplist) (lock-free sorted map), [SegQueue](https://docs.rs/crossbeam-queue) (lock-free MPMC queue) — no network hops, no serialization, and near-zero contention across all cores.
 
 ## Core count matters
 

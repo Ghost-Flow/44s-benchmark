@@ -11,7 +11,7 @@ keywords = ["benchmark", "lock-free", "cache", "redis", "performance"]
 dashmap = "5.5"
 crossbeam-skiplist = "0.1"
 crossbeam-queue = "0.3"
-redis = "0.24"
+redis = "0.27"
 num_cpus = "1.16"
 
 [profile.release]
